@@ -1250,19 +1250,31 @@ class OutputParser:
         self.buf += delta
         out: list[Event] = []
         while True:
+            if self.state == "utext":
+                # Overflow forfeits parsing for the rest of this turn. Resuming
+                # at a later tag could turn an argument/example into an action.
+                if self.buf:
+                    out.append(Event("content", self.buf))
+                    self.buf = ""
+                return out
             if self.state == "ucall":
                 # An opt-in unknown call waits for its complete canonical envelope.
                 # Unlike a declared call, it must never leak partial tool events.
                 end = self._wrapped_call_end()
                 if end < 0 and len(self.buf) <= UNKNOWN_TOOL_CALL_MAX + len(CALL_END):
                     return out
-                if end >= 0:
-                    body = self.buf[:end]
-                    raw = CALL_START + body + CALL_END
-                    self.buf = self.buf[end + len(CALL_END):]
-                else:                               # bounded fallback for a missing closer
-                    body, raw = "", CALL_START + self.buf
-                    self.buf = ""
+                if end < 0 or end > UNKNOWN_TOOL_CALL_MAX:
+                    # Whole and streamed input fail closed in the same way:
+                    # do not interpret nested or subsequent calls after overflow.
+                    self._note_undeclared(self._undeclared_name, False)
+                    self._undeclared_name = ""
+                    out.append(Event("content", CALL_START + self.buf))
+                    self.buf, self.state = "", "utext"
+                    self._reset_scan()
+                    return out
+                body = self.buf[:end]
+                raw = CALL_START + body + CALL_END
+                self.buf = self.buf[end + len(CALL_END):]
                 extent = function_end(body)
                 call = None
                 if 0 <= extent and len(body) <= UNKNOWN_TOOL_CALL_MAX and not body[extent:].strip():

@@ -2,10 +2,15 @@ name: Tool policy validation
 
 on:
   push:
-    branches: [fix/opencode-undeclared-tool-recovery]
+    branches: [main, fix/opencode-undeclared-tool-recovery]
     paths:
       - 'serve/**'
-      - '.github/tool-policy-harden.py'
+      - 'requirements.txt'
+      - '.github/workflows/tool-policy-validation.yml'
+  pull_request:
+    paths:
+      - 'serve/**'
+      - 'requirements.txt'
       - '.github/workflows/tool-policy-validation.yml'
 
 permissions:
@@ -15,8 +20,6 @@ jobs:
   compatibility:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -28,12 +31,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install runtime and test dependencies
         run: python -m pip install -r requirements.txt jsonschema
-      - name: Prepare guarded overflow hardening
-        run: python .github/tool-policy-harden.py
-      - name: Check syntax and whitespace
-        run: |
-          git diff --check
-          python -m py_compile serve/frontend.py serve/server.py serve/test_undeclared_tool_policy.py serve/test_undeclared_tool_limits.py
+      - name: Check syntax
+        run: python -m py_compile serve/frontend.py serve/server.py serve/test_undeclared_tool_policy.py serve/test_undeclared_tool_limits.py
       - name: Parser and HTTP compatibility regressions
         run: python -m unittest serve.test_tool_call_envelope serve.test_undeclared_tool_policy serve.test_undeclared_tool_limits -v
       - name: Existing tool and structured-output regressions
@@ -45,25 +44,6 @@ jobs:
           serve.test_server.ToolCallRecoverySwitch serve.test_server.UnfinishedToolCall
           serve.test_server.ToolArguments serve.test_server.ForcedToolChoice
           serve.test_server.HeldBackArgKeepalive serve.test_structured -v
-      - name: Store tested source blob without moving any branch
-        if: matrix.python == '3.13'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python - <<'PY'
-          import json, os, pathlib, urllib.request
-          repo = os.environ['GITHUB_REPOSITORY']
-          content = pathlib.Path('serve/frontend.py').read_text()
-          req = urllib.request.Request(
-              f'https://api.github.com/repos/{repo}/git/blobs',
-              data=json.dumps({'content': content, 'encoding': 'utf-8'}).encode(),
-              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-                       'Accept': 'application/vnd.github+json',
-                       'Content-Type': 'application/json'}, method='POST')
-          with urllib.request.urlopen(req, timeout=30) as response:
-              blob = json.load(response)
-          print('TESTED_BLOB serve/frontend.py', blob['sha'], flush=True)
-          PY
   server-regressions:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -74,7 +54,5 @@ jobs:
           python-version: '3.14'
       - name: Install runtime and test dependencies
         run: python -m pip install -r requirements.txt jsonschema
-      - name: Prepare guarded overflow hardening
-        run: python .github/tool-policy-harden.py
       - name: Full server and structured-output regressions
         run: python -m unittest serve.test_server serve.test_structured -v
