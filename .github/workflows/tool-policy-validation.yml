@@ -18,12 +18,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - name: Install test dependencies
-        run: python -m pip install jinja2 pytest jsonschema
+      - name: Install runtime and test dependencies
+        run: python -m pip install -r requirements.txt jsonschema
       - name: Prepare guarded native source changes
         run: python .github/tool-policy-prepare.py
       - name: Check patch whitespace and syntax
@@ -32,8 +32,15 @@ jobs:
           python -m py_compile serve/frontend.py serve/server.py serve/test_undeclared_tool_policy.py
       - name: Parser and HTTP compatibility regressions
         run: python -m unittest serve.test_tool_call_envelope serve.test_undeclared_tool_policy -v
-      - name: Existing server and structured-output regressions
-        run: python -m unittest serve.test_server serve.test_structured -v
+      - name: Existing tool and structured-output regressions
+        run: >-
+          python -m unittest
+          serve.test_reasoning_tools serve.test_reasoning_rescue serve.test_tool_name_space
+          serve.test_server.ToolCallTerminators serve.test_server.ToolCallTagInProse
+          serve.test_server.ToolCallRecovery serve.test_server.ToolCallRecoveryOff
+          serve.test_server.ToolCallRecoverySwitch serve.test_server.UnfinishedToolCall
+          serve.test_server.ToolArguments serve.test_server.ForcedToolChoice
+          serve.test_server.HeldBackArgKeepalive serve.test_structured -v
       - name: Store tested source blobs without moving any branch
         env:
           GH_TOKEN: ${{ github.token }}
@@ -53,6 +60,8 @@ jobs:
                   blob = json.load(response)
               print('TESTED_BLOB', path, blob['sha'], flush=True)
           PY
+      - name: Full server and structured-output regressions
+        run: python -m unittest serve.test_server serve.test_structured -v
       - name: Export exact validation source
         if: always()
         run: git ls-files -z | tar --null -T - -cf "$RUNNER_TEMP/strata-validation-source.tar"
