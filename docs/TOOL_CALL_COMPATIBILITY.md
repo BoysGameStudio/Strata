@@ -30,6 +30,12 @@ Only complete standard `<tool_call><function=NAME>...` envelopes in the answer
 are eligible. Unknown calls are buffered until both closing tags arrive; no
 partial tool events are sent. Malformed or cut calls stay text. The additional
 buffer is limited to 1,048,576 characters plus closing-tag lookahead, not tokens.
+If that limit is exceeded, the unknown block and **the remainder of the turn**
+are returned as text. Parsing does not resume at a later tag: that tag could be
+part of an argument rather than a real action. Calls delivered before the
+oversized block are not repeated or cancelled. This rare overflow fallback is
+not an automatic-recovery path.
+
 A name must contain 1–128 ASCII letters, digits, underscores, dots or hyphens.
 Arguments have no declared schema for an unknown name, so their types are parsed
 by the existing schema-free parser. The client must reject the name before any
@@ -63,16 +69,17 @@ call was passed to the client proves only delivery, not execution or recovery.
 Run the CPU-only tests from the checkout using its Python environment:
 
 ```sh
-python -m unittest serve.test_tool_call_envelope serve.test_undeclared_tool_policy -v
+python -m unittest serve.test_tool_call_envelope serve.test_undeclared_tool_policy serve.test_undeclared_tool_limits -v
 python -m unittest serve.test_server serve.test_structured -v
 ```
 
 The new tests cover the parser's streaming/recovery matrix, incomplete input,
 quoted examples, malformed names and envelopes, buffer boundaries, request
 policy gates, and real localhost HTTP/SSE responses over a scripted engine.
-A two-request protocol test sends a client tool error and then receives a valid
-`shell` call. It does not run shell commands and is not a real-model or OpenCode
-integration test.
+Oversized blocks with nested and following calls are checked with whole and
+fragmented input. A two-request protocol test sends a client tool error and then
+receives a valid `shell` call. It does not run shell commands and is not a
+real-model or OpenCode integration test.
 
 For deployment acceptance, verify with the actual OpenCode instance that the
 unknown call is rejected, its error is fed back, and a later valid call executes
