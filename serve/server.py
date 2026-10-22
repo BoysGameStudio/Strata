@@ -3766,6 +3766,7 @@ class Service:
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
+        self.undeclared_tool_policy = "text"              # opt-in: client-side unknown-tool feedback
         self.images = None                                # serve/images.py's ImageGen when the config has "images"
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
@@ -4908,7 +4909,11 @@ class Service:
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
         parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
-                              declared_only=declared_only)
+                              declared_only=declared_only,
+                              undeclared_tool_policy=(self.undeclared_tool_policy
+                                  if declared_only and not force and not (sampling or {}).get("strata_mcp")
+                                  and tool_choice_of((sampling or {}).get("tool_choice"))[0] == "auto"
+                                  else "text"))
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -8089,6 +8094,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
     except OSError as e:
         ap.error(listen_problem(a.host, a.port, e))
+    undeclared_policy = cfg.get("undeclared_tool_policy", "text")
+    if undeclared_policy not in ("text", "passthrough"):
+        ap.error('config undeclared_tool_policy must be "text" or "passthrough"')
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
     tok = ByteTokenizer()
@@ -8324,6 +8332,10 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     if not isinstance(recovery, bool):
         raise SystemExit(f"[strata] config \"tool_call_recovery\" must be true or false, not {recovery!r}")
     svc.tool_call_recovery = recovery
+    svc.undeclared_tool_policy = undeclared_policy
+    if undeclared_policy == "passthrough":
+        print('[strata] undeclared_tool_policy=passthrough: eligible external clients must reject '
+              'unavailable tools; no aliasing or automatic execution', flush=True)
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
         raise SystemExit(f"[strata] config \"env_to_user\" must be true or false, not {etu!r}")

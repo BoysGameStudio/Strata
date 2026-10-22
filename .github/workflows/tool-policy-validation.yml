@@ -2,34 +2,37 @@ name: Tool policy validation
 
 on:
   push:
-    branches: [fix/opencode-undeclared-tool-recovery]
+    branches: [main, fix/opencode-undeclared-tool-recovery]
     paths:
       - 'serve/**'
-      - '.github/tool-policy-prepare.py'
+      - 'requirements.txt'
+      - '.github/workflows/tool-policy-validation.yml'
+  pull_request:
+    paths:
+      - 'serve/**'
+      - 'requirements.txt'
       - '.github/workflows/tool-policy-validation.yml'
 
 permissions:
   contents: read
 
 jobs:
-  parser:
+  compatibility:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.13', '3.14']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python }}
       - name: Install runtime and test dependencies
         run: python -m pip install -r requirements.txt jsonschema
-      - name: Prepare guarded native source changes
-        run: python .github/tool-policy-prepare.py
-      - name: Check patch whitespace and syntax
-        run: |
-          git diff --check
-          python -m py_compile serve/frontend.py serve/server.py serve/test_undeclared_tool_policy.py
+      - name: Check syntax
+        run: python -m py_compile serve/frontend.py serve/server.py serve/test_undeclared_tool_policy.py
       - name: Parser and HTTP compatibility regressions
         run: python -m unittest serve.test_tool_call_envelope serve.test_undeclared_tool_policy -v
       - name: Existing tool and structured-output regressions
@@ -41,33 +44,15 @@ jobs:
           serve.test_server.ToolCallRecoverySwitch serve.test_server.UnfinishedToolCall
           serve.test_server.ToolArguments serve.test_server.ForcedToolChoice
           serve.test_server.HeldBackArgKeepalive serve.test_structured -v
-      - name: Store tested source blobs without moving any branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python - <<'PY'
-          import json, os, pathlib, urllib.request
-          repo = os.environ['GITHUB_REPOSITORY']
-          for path in ('serve/frontend.py', 'serve/server.py'):
-              content = pathlib.Path(path).read_text()
-              req = urllib.request.Request(
-                  f'https://api.github.com/repos/{repo}/git/blobs',
-                  data=json.dumps({'content': content, 'encoding': 'utf-8'}).encode(),
-                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-                           'Accept': 'application/vnd.github+json',
-                           'Content-Type': 'application/json'}, method='POST')
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  blob = json.load(response)
-              print('TESTED_BLOB', path, blob['sha'], flush=True)
-          PY
+  server-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - name: Install runtime and test dependencies
+        run: python -m pip install -r requirements.txt jsonschema
       - name: Full server and structured-output regressions
         run: python -m unittest serve.test_server serve.test_structured -v
-      - name: Export exact validation source
-        if: always()
-        run: git ls-files -z | tar --null -T - -cf "$RUNNER_TEMP/strata-validation-source.tar"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: strata-validation-source
-          path: ${{ runner.temp }}/strata-validation-source.tar
-          retention-days: 1
