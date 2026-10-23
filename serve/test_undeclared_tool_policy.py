@@ -58,6 +58,7 @@ class ParserPolicy(unittest.TestCase):
                     self.assertEqual(text(events), body())
                     self.assertFalse([e for e in events if e.kind.startswith("tool_")])
                     self.assertEqual((p.undeclared_as_text, p.undeclared_passthrough), (1, 0))
+                    self.assertEqual((p.unread, p.unread_names), (1, ["bash"]))
                     self.assertEqual(warning.call_count, 1)
 
     def test_passthrough_streaming_recovery_matrix(self):
@@ -69,6 +70,7 @@ class ParserPolicy(unittest.TestCase):
                         self.assertEqual(calls(events), [("bash", {"command": "pwd"})])
                         self.assertEqual(text(events), "")
                         self.assertEqual((p.undeclared_as_text, p.undeclared_passthrough), (0, 1))
+                        self.assertEqual((p.unread, p.unread_names), (0, []))
                         self.assertEqual(warning.call_count, 1)
                         self.assertNotIn("bash", p.schemas)
                         self.assertFalse(p._callable("bash"))
