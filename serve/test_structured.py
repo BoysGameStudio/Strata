@@ -1,5 +1,6 @@
 """Exercise the JSON contract through HTTP, including H3's strict Story shape."""
 import json
+import os
 import unittest
 import urllib.error
 import urllib.request
@@ -112,6 +113,28 @@ class Structured(unittest.TestCase):
         # Plain text callers retain normal streaming, without a JSON validation gate.
         self.assertEqual(self.chat("Prose.", response_format={"type": "text"})[0], 200)
 
+    def test_escape_repair_is_opt_in_and_works_before_streaming(self):
+        script = r'{"description":"条件为 $\alpha_0 > 1$，且 $\sigma > 0$"}'
+        fmt = {"type": "json_object"}
+        for setting in (None, "0", "true", "1"):
+            with self.subTest(setting=setting), mock.patch.dict(os.environ):
+                os.environ.pop("STRATA_JSON_ESCAPE_REPAIR", None)
+                if setting is not None:
+                    os.environ["STRATA_JSON_ESCAPE_REPAIR"] = setting
+                code, reply = self.chat(script, response_format=fmt)
+                if setting != "1":
+                    self.assertEqual(code, 502)
+                    self.assertEqual(reply["error"]["code"], "structured_output_failed")
+                    continue
+                self.assertEqual(code, 200, reply)
+                expected = {"description": r"条件为 $\alpha_0 > 1$，且 $\sigma > 0$"}
+                self.assertEqual(json.loads(reply["choices"][0]["message"]["content"]), expected)
+                _, raw = self.chat(script, response_format=fmt, stream=True)
+                chunks = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
+                content = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)
+                self.assertEqual(json.loads(content), expected)
+                self.assertIn("data: [DONE]", raw)
+
     def test_rejected_schema_does_not_load_the_engine_or_retry(self):
         with mock.patch.object(self.svc, "load") as load:
             code, _ = self.chat(response_format={"type": "json_schema"})
@@ -208,6 +231,64 @@ class Structured(unittest.TestCase):
                 "sys.exit(1 if any(m == 'jsonschema' or m.startswith('jsonschema.') for m in sys.modules) else 0)")
         r = subprocess.run([sys.executable, "-c", code], cwd=str(Path(__file__).resolve().parents[1]))
         self.assertEqual(r.returncode, 0)
+
+
+class EscapeRepair(unittest.TestCase):
+    def setUp(self):
+        env = mock.patch.dict(os.environ, {"STRATA_JSON_ESCAPE_REPAIR": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        _, self.validator = structured.prepare_format({"type": "json_object"}, [])
+
+    def test_repairs_nested_values_without_changing_valid_escapes(self):
+        script = r'{"values":["\alpha",{"s":"\sum"}],"ok":"\" \\ \/ \b \f \n \r \t \u4e2d","mixed":"\\alpha + \sigma","odd":"\\\alpha"}'
+        expected = {"values": [r"\alpha", {"s": r"\sum"}],
+                    "ok": '" \\ / \b \f \n \r \t 中', "mixed": r"\alpha + \sigma", "odd": r"\\alpha"}
+        result = structured.validated_json(script, self.validator, "stop")
+        self.assertEqual(json.loads(result), expected)
+        self.assertEqual(structured.validated_json(result, self.validator, "stop"), result)
+
+    def test_valid_json_stays_byte_identical_to_default(self):
+        script = r'{"text":"\n\t\r\b\f\u4e2d\\alpha","nested":[true,null,3]}'
+        enabled = structured.validated_json(script, self.validator, "stop")
+        with mock.patch.dict(os.environ, {"STRATA_JSON_ESCAPE_REPAIR": "0"}):
+            self.assertEqual(structured.validated_json(script, self.validator, "stop"), enabled)
+
+    def test_other_invalid_json_is_not_repaired(self):
+        for script in (r'{"\alpha":"x"}', r'{"x":"\alpha","y":"\uZZZZ"}',
+                       r'{"x":"\alpha","x":2}', r'{"x":"\alpha","y":NaN}',
+                       r'{"x":"\alpha","y":1e999}', r'{"x":"\alpha" "y":2}',
+                       r'{"x":"\alpha', r'{"x":"\alpha' + '\\', r'{"x":"\alpha","y":"line' + '\n' + 'break"}'):
+            with self.subTest(script=script), self.assertRaises(structured.StructuredOutputError):
+                structured.validated_json(script, self.validator, "stop")
+
+    def test_repair_does_not_bypass_finish_or_validation(self):
+        script = r'{"x":"\alpha"}'
+        with self.assertRaisesRegex(structured.StructuredOutputError, "incomplete"):
+            structured.validated_json(script, self.validator, "length")
+        validator = mock.Mock()
+        validator.iter_errors.return_value = iter([mock.Mock(absolute_path=("x",), message="wrong type")])
+        with self.assertRaisesRegex(structured.StructuredOutputError, "JSON Schema"):
+            structured.validated_json(script, validator, "stop")
+        validator.iter_errors.assert_called_once_with({"x": r"\alpha"})
+
+    def test_unterminated_escaped_string_does_not_rescan_each_quote(self):
+        import subprocess
+        import sys
+        code = r'''
+from serve import structured
+_, validator = structured.prepare_format({"type": "json_object"}, [])
+text = r'{"x":"\alpha' + r'\"' * 65536
+try:
+    structured.validated_json(text, validator, "stop")
+except structured.StructuredOutputError:
+    pass
+else:
+    raise AssertionError("unterminated string was accepted")
+'''
+        # Isolate the timeout so a quadratic regression cannot hang the test process.
+        subprocess.run([sys.executable, "-B", "-c", code], timeout=5, check=True,
+                       cwd=str(Path(__file__).resolve().parents[1]))
 
 
 if __name__ == "__main__":

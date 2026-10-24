@@ -8,6 +8,8 @@ json_schema is checked against its schema when the package is installed - withou
 JSON object, and the server says so once.
 """
 import json
+import os
+import re
 import threading
 
 
@@ -189,6 +191,28 @@ def _extract_json(text: str) -> str:
     return s[start:]
 
 
+def _repair_invalid_escapes(text):
+    """Double only invalid escapes in string values; leave keys and Unicode escapes strict."""
+    def string(match):
+        if match.group(2):                           # a key, not a string value
+            return match.group(0)
+        return re.sub(r'\\(?:["\\/bfnrtu]|(.))',
+                      lambda escape: "\\" + escape.group(0) if escape.group(1) else escape.group(0),
+                      match.group(0))
+
+    token = re.compile(r'("(?:[^"\\]|\\.)*")(\s*:)?')
+    parts = []
+    pos = 0
+    while (start := text.find('"', pos)) != -1:
+        match = token.match(text, start)
+        if match is None:                            # never restart inside an unterminated string
+            break
+        parts.extend((text[pos:start], string(match)))
+        pos = match.end()
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
 def validated_json(text, validator, finish):
     def pairs(items):
         obj = {}
@@ -204,7 +228,14 @@ def validated_json(text, validator, finish):
     if finish != "stop":
         raise StructuredOutputError(f"structured output was incomplete (finish_reason={finish}); increase the output budget")
     try:
-        value = json.loads(_extract_json(text), object_pairs_hook=pairs, parse_constant=constant)
+        candidate = _extract_json(text)
+        try:
+            value = json.loads(candidate, object_pairs_hook=pairs, parse_constant=constant)
+        except json.JSONDecodeError as exc:
+            # Opt-in compatibility for under-escaped LaTeX; no structural repair or model retry.
+            if os.environ.get("STRATA_JSON_ESCAPE_REPAIR") != "1" or exc.msg != "Invalid \\escape":
+                raise
+            value = json.loads(_repair_invalid_escapes(candidate), object_pairs_hook=pairs, parse_constant=constant)
         canonical = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     except (ValueError, TypeError) as exc:
         raise StructuredOutputError(f"model did not return valid JSON: {exc}") from exc
